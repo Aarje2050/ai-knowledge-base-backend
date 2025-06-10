@@ -24,15 +24,33 @@ async def chat_query(message: ChatMessage):
         # Get conversation history
         conversation_history = conversations.get(session_id, [])
         
+        print(f"🔍 Processing query: {message.message}")
+        
         # Generate embedding for the query
         query_embedding = await ai_service.get_embedding(message.message)
+        print(f"✅ Generated query embedding with {len(query_embedding)} dimensions")
         
-        # Search for relevant documents
+        # Search for relevant documents with lower threshold
         search_results = await vector_store.search(
             query_vector=query_embedding,
             top_k=5,
-            company_id="default"  # For Phase 1, using default company
+            company_id="default"
         )
+        
+        print(f"🔍 Found {len(search_results)} search results with company filter")
+        for i, result in enumerate(search_results):
+            print(f"  Result {i+1}: Score {result.score:.3f}, Content: {result.content[:100]}...")
+        
+        # If no results with company filter, try without filters
+        if not search_results:
+            print("🔍 Trying search without company filter...")
+            search_results = await vector_store.search(
+                query_vector=query_embedding,
+                top_k=5
+            )
+            print(f"🔍 Found {len(search_results)} results without filters")
+            for i, result in enumerate(search_results):
+                print(f"  Result {i+1}: Score {result.score:.3f}, Content: {result.content[:100]}...")
         
         if not search_results:
             response_text = "I couldn't find any relevant information in the knowledge base to answer your question. Please make sure documents have been uploaded and processed."
@@ -89,6 +107,47 @@ async def clear_conversation(session_id: str):
     if session_id in conversations:
         del conversations[session_id]
     return {"message": "Conversation cleared"}
+
+@router.get("/debug/vectors")
+async def debug_vectors():
+    """Debug endpoint to check vector storage"""
+    try:
+        # Check Qdrant collection info
+        collection_info = vector_store.client.get_collection(vector_store.collection_name)
+        
+        # Get some sample points
+        points = vector_store.client.scroll(
+            collection_name=vector_store.collection_name,
+            limit=5
+        )
+        
+        sample_docs = []
+        for point in points[0]:
+            sample_docs.append({
+                "id": str(point.id),
+                "filename": point.payload.get("metadata", {}).get("filename", "unknown"),
+                "content_preview": point.payload.get("content", "")[:100] + "...",
+                "chunk_index": point.payload.get("metadata", {}).get("chunk_index", "unknown"),
+                "company_id": point.payload.get("metadata", {}).get("company_id", "unknown")
+            })
+        
+        return {
+            "status": "success",
+            "collection_info": {
+                "points_count": collection_info.points_count,
+                "vectors_count": collection_info.vectors_count,
+                "status": str(collection_info.status)
+            },
+            "sample_documents": sample_docs,
+            "total_documents_found": len(sample_docs)
+        }
+    except Exception as e:
+        print(f"❌ Debug error: {e}")
+        return {
+            "status": "error", 
+            "error": str(e),
+            "message": "Failed to get collection info"
+        }
 
 @router.get("/test")
 async def test_search(query: str = "test query"):

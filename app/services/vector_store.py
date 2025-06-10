@@ -98,12 +98,13 @@ class VectorStore:
             if filter_conditions:
                 query_filter = Filter(must=filter_conditions)
             
-            # Search
+            # Search with lower score threshold for better results
             search_result = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_vector,
                 query_filter=query_filter,
                 limit=top_k,
+                score_threshold=0.1,  # Very low threshold to catch more results
                 with_payload=True,
                 with_vectors=False
             )
@@ -117,6 +118,11 @@ class VectorStore:
                     metadata=hit.payload["metadata"]
                 )
                 results.append(result)
+            
+            print(f"🔍 Vector search found {len(results)} results")
+            if results:
+                print(f"🔍 Best score: {results[0].score:.3f}")
+                print(f"🔍 Worst score: {results[-1].score:.3f}")
             
             return results
             
