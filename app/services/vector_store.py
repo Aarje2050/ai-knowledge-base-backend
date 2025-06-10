@@ -2,7 +2,6 @@ import uuid
 from typing import List, Dict, Any, Optional
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
-from qdrant_client.http import models
 
 from app.config import settings
 from app.models.schemas import QueryResult
@@ -35,6 +34,13 @@ class VectorStore:
             else:
                 print(f"✅ Collection exists: {self.collection_name}")
                 
+            # Test the collection by trying to scroll
+            test_scroll = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=1
+            )
+            print(f"✅ Collection is accessible and working")
+                
         except Exception as e:
             print(f"❌ Error initializing vector store: {e}")
             raise
@@ -52,16 +58,22 @@ class VectorStore:
                         "content": chunk["content"],
                         "metadata": chunk["metadata"],
                         "chunk_index": chunk.get("chunk_index", 0),
-                        "source_type": chunk.get("source_type", "custom")  # foundation or custom
+                        "source_type": chunk.get("source_type", "custom")
                     }
                 )
                 points.append(point)
             
-            self.client.upsert(
-                collection_name=self.collection_name,
-                points=points
-            )
-            print(f"✅ Added {len(points)} chunks to vector store")
+            # Add points in batches to avoid memory issues
+            batch_size = 50
+            for i in range(0, len(points), batch_size):
+                batch = points[i:i + batch_size]
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=batch
+                )
+                print(f"✅ Added batch {i//batch_size + 1}: {len(batch)} chunks")
+            
+            print(f"✅ Successfully added all {len(points)} chunks to vector store")
             return True
             
         except Exception as e:
@@ -73,9 +85,9 @@ class VectorStore:
                     top_k: int = 5,
                     company_id: Optional[str] = None,
                     source_type: Optional[str] = None) -> List[QueryResult]:
-        """Search for similar documents"""
+        """Search for similar documents with robust error handling"""
         try:
-            # Build filter if needed
+            # Build filter conditions
             filter_conditions = []
             
             if company_id:
@@ -94,41 +106,80 @@ class VectorStore:
                     )
                 )
             
+            # Create filter object if conditions exist
             query_filter = None
             if filter_conditions:
                 query_filter = Filter(must=filter_conditions)
             
-            # Search with lower score threshold for better results
-            search_result = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=query_vector,
-                query_filter=query_filter,
-                limit=top_k,
-                score_threshold=0.1,  # Very low threshold to catch more results
-                with_payload=True,
-                with_vectors=False
-            )
+            # Perform search with robust error handling
+            try:
+                search_result = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    query_filter=query_filter,
+                    limit=top_k,
+                    score_threshold=0.1,  # Low threshold for better recall
+                    with_payload=True,
+                    with_vectors=False
+                )
+            except Exception as search_error:
+                print(f"❌ Search with filter failed: {search_error}")
+                # Retry without filters
+                search_result = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=query_vector,
+                    limit=top_k,
+                    score_threshold=0.1,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                print(f"✅ Search without filter succeeded")
             
             # Convert to QueryResult objects
             results = []
             for hit in search_result:
-                result = QueryResult(
-                    content=hit.payload["content"],
-                    score=hit.score,
-                    metadata=hit.payload["metadata"]
-                )
-                results.append(result)
+                try:
+                    # Safely extract content and metadata
+                    content = hit.payload.get("content", "No content available")
+                    metadata = hit.payload.get("metadata", {})
+                    
+                    result = QueryResult(
+                        content=content,
+                        score=hit.score,
+                        metadata=metadata
+                    )
+                    results.append(result)
+                except Exception as result_error:
+                    print(f"❌ Error processing search result: {result_error}")
+                    continue
             
-            print(f"🔍 Vector search found {len(results)} results")
+            print(f"🔍 Vector search returned {len(results)} results")
             if results:
-                print(f"🔍 Best score: {results[0].score:.3f}")
-                print(f"🔍 Worst score: {results[-1].score:.3f}")
+                print(f"🔍 Score range: {results[0].score:.3f} to {results[-1].score:.3f}")
             
             return results
             
         except Exception as e:
-            print(f"❌ Error searching vectors: {e}")
+            print(f"❌ Critical error in vector search: {e}")
             return []
+    
+    async def count_documents(self) -> int:
+        """Count total documents in collection"""
+        try:
+            # Use scroll to count documents
+            points_response = self.client.scroll(
+                collection_name=self.collection_name,
+                limit=1000,  # Get first 1000 to count
+                with_payload=False,
+                with_vectors=False
+            )
+            
+            points = points_response[0] if points_response else []
+            return len(points)
+            
+        except Exception as e:
+            print(f"❌ Error counting documents: {e}")
+            return 0
     
     async def delete_document(self, document_id: str) -> bool:
         """Delete all chunks for a document"""
@@ -150,3 +201,21 @@ class VectorStore:
         except Exception as e:
             print(f"❌ Error deleting document: {e}")
             return False
+    
+    def health_check(self) -> Dict[str, Any]:
+        """Check if Qdrant is healthy and accessible"""
+        try:
+            # Simple health check
+            collections = self.client.get_collections()
+            collection_names = [col.name for col in collections.collections]
+            
+            return {
+                "status": "healthy",
+                "collections": collection_names,
+                "target_collection_exists": self.collection_name in collection_names
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e)
+            }

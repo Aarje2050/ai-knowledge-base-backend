@@ -30,7 +30,7 @@ wheels/
 uploads/
 *.pdf
 *.docx
-*.txt
+
 
 # IDE
 .vscode/

@@ -110,43 +110,79 @@ async def clear_conversation(session_id: str):
 
 @router.get("/debug/vectors")
 async def debug_vectors():
-    """Debug endpoint to check vector storage"""
+    """Debug endpoint to check vector storage - Enterprise version"""
     try:
-        # Check Qdrant collection info
-        collection_info = vector_store.client.get_collection(vector_store.collection_name)
-        
-        # Get some sample points
-        points = vector_store.client.scroll(
+        # Simple count check using scroll
+        points_response = vector_store.client.scroll(
             collection_name=vector_store.collection_name,
-            limit=5
+            limit=10,
+            with_payload=True,
+            with_vectors=False
         )
         
+        points = points_response[0] if points_response else []
+        
         sample_docs = []
-        for point in points[0]:
-            sample_docs.append({
-                "id": str(point.id),
-                "filename": point.payload.get("metadata", {}).get("filename", "unknown"),
-                "content_preview": point.payload.get("content", "")[:100] + "...",
-                "chunk_index": point.payload.get("metadata", {}).get("chunk_index", "unknown"),
-                "company_id": point.payload.get("metadata", {}).get("company_id", "unknown")
-            })
+        for point in points:
+            try:
+                filename = "unknown"
+                content_preview = "No content"
+                chunk_index = "unknown"
+                company_id = "unknown"
+                
+                if hasattr(point, 'payload') and point.payload:
+                    metadata = point.payload.get("metadata", {})
+                    filename = metadata.get("filename", "unknown")
+                    content_preview = point.payload.get("content", "No content")[:100] + "..."
+                    chunk_index = metadata.get("chunk_index", "unknown")
+                    company_id = metadata.get("company_id", "unknown")
+                
+                sample_docs.append({
+                    "id": str(point.id) if hasattr(point, 'id') else "unknown",
+                    "filename": filename,
+                    "content_preview": content_preview,
+                    "chunk_index": chunk_index,
+                    "company_id": company_id
+                })
+            except Exception as point_error:
+                print(f"Error processing point: {point_error}")
+                continue
         
         return {
             "status": "success",
-            "collection_info": {
-                "points_count": collection_info.points_count,
-                "vectors_count": collection_info.vectors_count,
-                "status": str(collection_info.status)
-            },
+            "total_documents_found": len(sample_docs),
             "sample_documents": sample_docs,
-            "total_documents_found": len(sample_docs)
+            "message": f"Found {len(sample_docs)} document chunks in vector store"
         }
+        
     except Exception as e:
         print(f"❌ Debug error: {e}")
         return {
             "status": "error", 
             "error": str(e),
-            "message": "Failed to get collection info"
+            "message": "Failed to retrieve vector store information"
+        }
+
+@router.get("/debug/simple")
+async def debug_simple():
+    """Simple debug endpoint to test basic connectivity"""
+    try:
+        # Test if we can connect to Qdrant
+        collections = vector_store.client.get_collections()
+        collection_names = [col.name for col in collections.collections]
+        
+        return {
+            "status": "success",
+            "qdrant_connected": True,
+            "available_collections": collection_names,
+            "target_collection": vector_store.collection_name,
+            "collection_exists": vector_store.collection_name in collection_names
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "qdrant_connected": False,
+            "error": str(e)
         }
 
 @router.get("/test")
@@ -161,14 +197,21 @@ async def test_search(query: str = "test query"):
         
         return {
             "query": query,
+            "embedding_generated": True,
+            "embedding_dimensions": len(query_embedding),
             "results_found": len(results),
             "results": [
                 {
-                    "content": r.content[:100] + "...",
-                    "score": r.score,
-                    "metadata": r.metadata
+                    "content": r.content[:100] + "..." if len(r.content) > 100 else r.content,
+                    "score": round(r.score, 3),
+                    "filename": r.metadata.get("filename", "unknown")
                 } for r in results
             ]
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "error": str(e),
+            "query": query,
+            "embedding_generated": False,
+            "results_found": 0
+        }
